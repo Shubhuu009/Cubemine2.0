@@ -2,6 +2,9 @@ const User = require('../models/User');
 const SolveHistory = require('../models/SolveHistory');
 const { isUsingMemoryStore } = require('../config/db');
 const memoryStore = require('../services/memoryStore');
+
+const VALID_CUBE_TYPES = ['2x2', '3x3', '4x4', '5x5'];
+
 const getProfile = async (req, res, next) => {
   try {
     if (isUsingMemoryStore()) {
@@ -36,6 +39,8 @@ const getProfile = async (req, res, next) => {
         totalSolves: user.totalSolves,
         bestTime2x2: user.bestTime2x2,
         bestTime3x3: user.bestTime3x3,
+        bestTime4x4: user.bestTime4x4,
+        bestTime5x5: user.bestTime5x5,
         createdAt: user.createdAt,
         updatedAt: user.updatedAt,
       },
@@ -50,7 +55,7 @@ const getHistory = async (req, res, next) => {
     const limit = parseInt(req.query.limit) || 20;
     const skip = (page - 1) * limit;
     const filter = { userId: req.user._id };
-    if (req.query.cubeType && ['2x2', '3x3'].includes(req.query.cubeType)) {
+    if (req.query.cubeType && VALID_CUBE_TYPES.includes(req.query.cubeType)) {
       filter.cubeType = req.query.cubeType;
     }
 
@@ -103,7 +108,7 @@ const getHistory = async (req, res, next) => {
 };
 const getLeaderboard = async (req, res, next) => {
   try {
-    const sortBy = req.query.sortBy || 'totalSolves'; // totalSolves, bestTime2x2, bestTime3x3
+    const sortBy = req.query.sortBy || 'totalSolves';
     const limit = Math.min(parseInt(req.query.limit) || 25, 100);
 
     if (isUsingMemoryStore()) {
@@ -140,13 +145,21 @@ const getLeaderboard = async (req, res, next) => {
         sortField = { bestTime3x3: 1 };
         filter = { bestTime3x3: { $ne: null } };
         break;
+      case 'bestTime4x4':
+        sortField = { bestTime4x4: 1 };
+        filter = { bestTime4x4: { $ne: null } };
+        break;
+      case 'bestTime5x5':
+        sortField = { bestTime5x5: 1 };
+        filter = { bestTime5x5: { $ne: null } };
+        break;
       default:
         sortField = { totalSolves: -1 };
         filter = { totalSolves: { $gt: 0 } };
     }
 
     const users = await User.find(filter)
-      .select('username totalSolves bestTime2x2 bestTime3x3 createdAt')
+      .select('username totalSolves bestTime2x2 bestTime3x3 bestTime4x4 bestTime5x5 createdAt')
       .sort(sortField)
       .limit(limit)
       .lean();
@@ -157,6 +170,8 @@ const getLeaderboard = async (req, res, next) => {
       totalSolves: user.totalSolves,
       bestTime2x2: user.bestTime2x2,
       bestTime3x3: user.bestTime3x3,
+      bestTime4x4: user.bestTime4x4,
+      bestTime5x5: user.bestTime5x5,
       memberSince: user.createdAt,
     }));
 
@@ -178,7 +193,7 @@ const getStatistics = async (req, res, next) => {
     const cubeTypeFilter = req.query.cubeType;
 
     const filter = { userId };
-    if (cubeTypeFilter && ['2x2', '3x3'].includes(cubeTypeFilter)) {
+    if (cubeTypeFilter && VALID_CUBE_TYPES.includes(cubeTypeFilter)) {
       filter.cubeType = cubeTypeFilter;
     }
 
@@ -277,6 +292,8 @@ const sendStatistics = (res, solves) => {
     const cubeBreakdown = {
       '2x2': solves.filter((s) => s.cubeType === '2x2').length,
       '3x3': solves.filter((s) => s.cubeType === '3x3').length,
+      '4x4': solves.filter((s) => s.cubeType === '4x4').length,
+      '5x5': solves.filter((s) => s.cubeType === '5x5').length,
     };
     let currentStreak = 0;
     let longestStreak = 0;
