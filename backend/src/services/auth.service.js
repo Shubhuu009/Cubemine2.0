@@ -1,8 +1,6 @@
 const User = require('../models/User');
 const { hashPassword, comparePassword } = require('../utils/hash');
 const { generateToken } = require('../utils/jwt');
-const { isUsingMemoryStore } = require('../config/db');
-const memoryStore = require('./memoryStore');
 
 const GOOGLE_TOKENINFO_URL = 'https://oauth2.googleapis.com/tokeninfo?id_token=';
 
@@ -57,30 +55,8 @@ const verifyGoogleToken = async (credential) => {
 };
 
 class AuthService {
-  
   static async signup({ username, email, password }) {
-    if (isUsingMemoryStore()) {
-      const existingUser = memoryStore.findUserByEmailOrUsername({ email, username });
-
-      if (existingUser) {
-        const field = existingUser.email === email.toLowerCase() ? 'Email' : 'Username';
-        const error = new Error(`${field} already registered`);
-        error.statusCode = 409;
-        throw error;
-      }
-
-      const hashedPassword = await hashPassword(password);
-      const user = memoryStore.createUser({ username, email, password: hashedPassword });
-      const token = generateToken({ id: user._id, email: user.email });
-
-      return {
-        user: memoryStore.publicUser(user),
-        token,
-      };
-    }
-    const existingUser = await User.findOne({
-      $or: [{ email }, { username }],
-    });
+    const existingUser = await User.findOne({ $or: [{ email }, { username }] });
 
     if (existingUser) {
       const field = existingUser.email === email ? 'Email' : 'Username';
@@ -88,51 +64,15 @@ class AuthService {
       error.statusCode = 409;
       throw error;
     }
+
     const hashedPassword = await hashPassword(password);
-    const user = await User.create({
-      username,
-      email,
-      password: hashedPassword,
-    });
+    const user = await User.create({ username, email, password: hashedPassword });
     const token = generateToken({ id: user._id, email: user.email });
-    return {
-      user: toPublicUser(user),
-      token,
-    };
+
+    return { user: toPublicUser(user), token };
   }
 
-  
   static async login({ email, password }) {
-    if (isUsingMemoryStore()) {
-      const user = memoryStore.findUserByEmail(email);
-
-      if (!user) {
-        const error = new Error('Invalid email or password');
-        error.statusCode = 401;
-        throw error;
-      }
-
-      if (!user.password) {
-        const error = new Error('This account uses Google. Continue with Google instead.');
-        error.statusCode = 401;
-        throw error;
-      }
-
-      const isMatch = await comparePassword(password, user.password);
-
-      if (!isMatch) {
-        const error = new Error('Invalid email or password');
-        error.statusCode = 401;
-        throw error;
-      }
-
-      const token = generateToken({ id: user._id, email: user.email });
-
-      return {
-        user: memoryStore.publicUser(user),
-        token,
-      };
-    }
     const user = await User.findOne({ email }).select('+password');
 
     if (!user) {
@@ -140,51 +80,27 @@ class AuthService {
       error.statusCode = 401;
       throw error;
     }
+
     if (!user.password) {
       const error = new Error('This account uses Google. Continue with Google instead.');
       error.statusCode = 401;
       throw error;
     }
-    const isMatch = await comparePassword(password, user.password);
 
+    const isMatch = await comparePassword(password, user.password);
     if (!isMatch) {
       const error = new Error('Invalid email or password');
       error.statusCode = 401;
       throw error;
     }
-    const token = generateToken({ id: user._id, email: user.email });
 
-    return {
-      user: toPublicUser(user),
-      token,
-    };
+    const token = generateToken({ id: user._id, email: user.email });
+    return { user: toPublicUser(user), token };
   }
 
   static async googleLogin({ credential }) {
     const googleUser = await verifyGoogleToken(credential);
     const email = googleUser.email.toLowerCase();
-
-    if (isUsingMemoryStore()) {
-      let user = memoryStore.findUserByGoogleId(googleUser.sub) || memoryStore.findUserByEmail(email);
-      if (user) {
-        user = memoryStore.updateUser(user._id, {
-          authProvider: 'google',
-          googleId: googleUser.sub,
-          avatar: googleUser.picture || user.avatar || null,
-        });
-      } else {
-        user = memoryStore.createUser({
-          username: createUsernameFromGoogle(googleUser),
-          email,
-          authProvider: 'google',
-          googleId: googleUser.sub,
-          avatar: googleUser.picture || null,
-        });
-      }
-
-      const token = generateToken({ id: user._id, email: user.email });
-      return { user: memoryStore.publicUser(user), token };
-    }
 
     let user = await User.findOne({ $or: [{ googleId: googleUser.sub }, { email }] });
     if (user) {

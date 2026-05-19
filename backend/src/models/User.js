@@ -1,6 +1,5 @@
 const mongoose = require('mongoose');
 
-
 const userSchema = new mongoose.Schema(
   {
     username: {
@@ -22,50 +21,26 @@ const userSchema = new mongoose.Schema(
     },
     password: {
       type: String,
-      required: function requirePassword() {
-        return this.authProvider !== 'google';
-      },
+      required: function requirePassword() { return this.authProvider !== 'google'; },
       minlength: [6, 'Password must be at least 6 characters'],
-      select: false, // Don't include password in queries by default
+      select: false,
     },
-    authProvider: {
-      type: String,
-      enum: ['local', 'google'],
-      default: 'local',
-    },
-    googleId: {
-      type: String,
-      unique: true,
-      sparse: true,
-    },
-    avatar: {
-      type: String,
-      default: null,
-    },
-    totalSolves: {
-      type: Number,
-      default: 0,
-    },
-    bestTime2x2: {
-      type: Number, // in milliseconds
-      default: null,
-    },
-    bestTime3x3: {
-      type: Number, // in milliseconds
-      default: null,
-    },
-    bestTime4x4: {
-      type: Number, // in milliseconds
-      default: null,
-    },
-    bestTime5x5: {
-      type: Number, // in milliseconds
-      default: null,
+    authProvider: { type: String, enum: ['local', 'google'], default: 'local' },
+    googleId: { type: String, unique: true, sparse: true },
+    avatar: { type: String, default: null },
+    totalSolves: { type: Number, default: 0 },
+    bestTime2x2: { type: Number, default: null },
+    bestTime3x3: { type: Number, default: null },
+    bestTime4x4: { type: Number, default: null },
+    bestTime5x5: { type: Number, default: null },
+    preferences: {
+      theme: { type: String, enum: ['dark', 'light'], default: 'dark' },
+      showTimer: { type: Boolean, default: true },
+      enableKeyboardShortcuts: { type: Boolean, default: true },
+      enableNotifications: { type: Boolean, default: true },
     },
   },
-  {
-    timestamps: true, // Adds createdAt and updatedAt automatically
-  }
+  { timestamps: true }
 );
 
 module.exports = mongoose.model('User', userSchema);

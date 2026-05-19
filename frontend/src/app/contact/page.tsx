@@ -7,6 +7,7 @@ import {
   AlertCircle, Github, Clock, Zap, HelpCircle,
 } from 'lucide-react';
 import Link from 'next/link';
+import { contactAPI } from '@/services/api';
 
 const topics = [
   'Bug Report',
@@ -40,9 +41,13 @@ export default function ContactPage() {
     if (Object.keys(v).length) { setErrors(v); return; }
     setErrors({});
     setStatus('sending');
-    // Simulate submission (replace with real API call)
-    await new Promise((r) => setTimeout(r, 1800));
-    setStatus('success');
+    try {
+      await contactAPI.submit(form);
+      setStatus('success');
+    } catch {
+      setStatus('error');
+      setTimeout(() => setStatus('idle'), 3000);
+    }
   };
 
   const update = (k: string, v: string) => {

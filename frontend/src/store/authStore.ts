@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { User } from '@/types';
+import { User, UserPreferences } from '@/types';
 import { authAPI, userAPI } from '@/services/api';
 
 interface AuthState {
@@ -13,6 +13,7 @@ interface AuthState {
   googleLogin: (credential: string) => Promise<void>;
   logout: () => void;
   fetchProfile: () => Promise<void>;
+  updateUser: (data: Partial<User>) => void;
   hydrate: () => void;
   clearError: () => void;
 }
@@ -71,6 +72,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     } catch {
       get().logout();
     }
+  },
+
+  updateUser: (data) => {
+    set((state) => ({ user: state.user ? { ...state.user, ...data } : null }));
   },
 
   hydrate: () => {
