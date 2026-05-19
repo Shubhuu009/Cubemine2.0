@@ -21,7 +21,11 @@
       "purpose": "any maskable"
     }
   ],
-  "categories": ["education", "games", "utilities"],
+  "categories": [
+    "education",
+    "games",
+    "utilities"
+  ],
   "screenshots": [],
   "shortcuts": [
     {
