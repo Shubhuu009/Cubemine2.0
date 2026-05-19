@@ -10,7 +10,16 @@ const PORT = process.env.PORT || 5000;
 
 const startServer = async () => {
   try {
-    await connectDB();
+    try {
+      await connectDB();
+    } catch (error) {
+      if (process.env.NODE_ENV !== 'development') {
+        throw error;
+      }
+
+      console.warn(`Database unavailable: ${error.message}. Starting development server without persistence.`);
+    }
+
     await initCache();
 
     const server = app.listen(PORT, () => {
