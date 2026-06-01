@@ -1,8 +1,8 @@
 /**
- * Cache service — Upstash Redis REST API only.
- * Uses fetch (no TCP sockets), works in any environment including serverless.
+ * Cache service - Upstash Redis REST API only.
+ * Uses fetch (no TCP sockets), works in serverless and local Node 18+.
  * If UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN are not set the app
- * still runs — cache calls are silent no-ops.
+ * still runs, but cache calls become safe no-ops.
  */
 
 let client = null;
@@ -13,7 +13,7 @@ const initCache = async () => {
   const token = process.env.UPSTASH_REDIS_REST_TOKEN;
 
   if (!url || !token) {
-    console.warn('Cache: UPSTASH_REDIS_REST_URL / TOKEN not set — caching disabled.');
+    console.warn('Cache: UPSTASH_REDIS_REST_URL / TOKEN not set - caching disabled.');
     return;
   }
 
@@ -48,7 +48,8 @@ const initCache = async () => {
     console.log(`Cache: Upstash Redis connected (${baseUrl})`);
   } catch (err) {
     client = null;
-    console.warn(`Cache: Upstash connection failed — ${err.message}. Caching disabled.`);
+    ready = false;
+    console.warn(`Cache: Upstash connection failed - ${err.message}. Caching disabled.`);
   }
 };
 
@@ -86,7 +87,7 @@ const delPattern = async (pattern) => {
   try {
     const keys = await client.keys(pattern);
     if (keys && keys.length > 0) {
-      for (const k of keys) await client.del(k);
+      await client.del(...keys);
     }
   } catch (err) {
     console.warn(`Cache DEL_PATTERN error (${pattern}): ${err.message}`);
@@ -103,6 +104,13 @@ const flush = async () => {
   }
 };
 
+const createScanSession = async (sessionId, payload, ttlSeconds = 10 * 60) => {
+  await set(`scan:${sessionId}`, payload, ttlSeconds);
+};
+
+const getScanSession = async (sessionId) => get(`scan:${sessionId}`);
+const deleteScanSession = async (sessionId) => del(`scan:${sessionId}`);
+
 const getStats = () => ({
   type: ready ? 'upstash-redis' : 'disabled',
   status: ready ? 'connected' : 'not configured',
@@ -110,7 +118,19 @@ const getStats = () => ({
 
 const getCacheType = () => (ready ? 'upstash-redis' : 'disabled');
 
-// Upstash REST is stateless — nothing to disconnect
 const disconnect = async () => {};
 
-module.exports = { initCache, get, set, del, delPattern, flush, getStats, getCacheType, disconnect };
+module.exports = {
+  initCache,
+  get,
+  set,
+  del,
+  delPattern,
+  flush,
+  createScanSession,
+  getScanSession,
+  deleteScanSession,
+  getStats,
+  getCacheType,
+  disconnect,
+};

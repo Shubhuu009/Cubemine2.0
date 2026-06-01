@@ -43,4 +43,10 @@ const userSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+userSchema.index({ totalSolves: -1 });
+userSchema.index({ bestTime2x2: 1 });
+userSchema.index({ bestTime3x3: 1 });
+userSchema.index({ bestTime4x4: 1 });
+userSchema.index({ bestTime5x5: 1 });
+
 module.exports = mongoose.model('User', userSchema);

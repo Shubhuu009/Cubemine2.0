@@ -6,7 +6,7 @@ import {
   AlertCircle, ArrowLeft, ArrowRight, Maximize, RotateCcw,
   Undo2, Wand2, Timer as TimerIcon, Keyboard, X, Play, Pause,
   RotateCw, Copy, Check, Upload, Video, Camera, Square, ScanLine,
-  Sparkles, FileVideo, Eye,
+  FileVideo, Eye, SwitchCamera,
 } from 'lucide-react';
 import { CubeColor } from '@/types';
 import { useSolverStore } from '@/store/solverStore';
@@ -23,6 +23,309 @@ const COLORS: { value: CubeColor; label: string; hex: string; ring: string; shor
   { value: 'B', label: 'Blue', hex: '#3b82f6', ring: 'ring-blue-400/70', shortcut: '5' },
   { value: 'G', label: 'Green', hex: '#22c55e', ring: 'ring-green-400/70', shortcut: '6' },
 ];
+
+const COLOR_HEX = COLORS.reduce((acc, color) => {
+  acc[color.value] = color.hex;
+  return acc;
+}, {} as Record<CubeColor, string>);
+
+type CameraFacingMode = 'environment' | 'user';
+
+type Rgb = { r: number; g: number; b: number };
+
+type SampleCandidate = {
+  index: number;
+  rgb: Rgb;
+  scores: Record<CubeColor, number>;
+};
+
+type ColorDecision = {
+  color: CubeColor;
+  confidence: number;
+  score: number;
+  runnerUp: number;
+};
+
+type ScannedFace = {
+  id: number;
+  label: string;
+  samples: SampleCandidate[];
+  colors: CubeColor[];
+  confidence: number;
+  capturedAt: number;
+};
+
+type ScanReport = {
+  colors: CubeColor[];
+  confidence: number;
+  counts: Record<CubeColor, number>;
+  valid: boolean;
+  message: string;
+  details: string[];
+};
+
+const COLOR_REFERENCES: Record<CubeColor, Rgb> = {
+  W: { r: 248, g: 250, b: 252 },
+  Y: { r: 255, g: 210, b: 38 },
+  R: { r: 239, g: 63, b: 70 },
+  O: { r: 255, g: 122, b: 24 },
+  B: { r: 59, g: 130, b: 246 },
+  G: { r: 34, g: 197, b: 94 },
+};
+
+const CUBE_COLORS: CubeColor[] = ['W', 'Y', 'R', 'O', 'B', 'G'];
+
+const SCAN_FACE_ORDER = ['Up', 'Right', 'Front', 'Down', 'Left', 'Back'];
+
+const emptyColorCounts = () => CUBE_COLORS.reduce((acc, color) => {
+  acc[color] = 0;
+  return acc;
+}, {} as Record<CubeColor, number>);
+
+const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
+
+const srgbToLinear = (value: number) => {
+  const channel = value / 255;
+  return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+};
+
+const rgbToLab = ({ r, g, b }: Rgb) => {
+  const rl = srgbToLinear(r);
+  const gl = srgbToLinear(g);
+  const bl = srgbToLinear(b);
+
+  let x = rl * 0.4124 + gl * 0.3576 + bl * 0.1805;
+  let y = rl * 0.2126 + gl * 0.7152 + bl * 0.0722;
+  let z = rl * 0.0193 + gl * 0.1192 + bl * 0.9505;
+
+  x /= 0.95047;
+  y /= 1.00000;
+  z /= 1.08883;
+
+  const f = (value: number) => (value > 0.008856 ? Math.cbrt(value) : (7.787 * value) + (16 / 116));
+  const fx = f(x);
+  const fy = f(y);
+  const fz = f(z);
+
+  return {
+    l: (116 * fy) - 16,
+    a: 500 * (fx - fy),
+    b: 200 * (fy - fz),
+  };
+};
+
+const COLOR_LABS = CUBE_COLORS.reduce((acc, color) => {
+  acc[color] = rgbToLab(COLOR_REFERENCES[color]);
+  return acc;
+}, {} as Record<CubeColor, ReturnType<typeof rgbToLab>>);
+
+const scoreColor = (
+  rgb: Rgb,
+  color: CubeColor,
+  references: Record<CubeColor, ReturnType<typeof rgbToLab>> = COLOR_LABS,
+) => {
+  const lab = rgbToLab(rgb);
+  const reference = references[color];
+  const dl = lab.l - reference.l;
+  const da = lab.a - reference.a;
+  const db = lab.b - reference.b;
+  return Math.sqrt(dl * dl + da * da + db * db);
+};
+
+const classifyRgb = (
+  rgb: Rgb,
+  references: Record<CubeColor, ReturnType<typeof rgbToLab>> = COLOR_LABS,
+): ColorDecision => {
+  const ranked = CUBE_COLORS
+    .map((color) => ({ color, score: scoreColor(rgb, color, references) }))
+    .sort((a, b) => a.score - b.score);
+  const best = ranked[0];
+  const runnerUp = ranked[1]?.score ?? best.score;
+  const separationConfidence = clamp01((runnerUp - best.score) / 28);
+  const distanceConfidence = clamp01(1 - best.score / 90);
+
+  return {
+    color: best.color,
+    score: best.score,
+    runnerUp,
+    confidence: clamp01(separationConfidence * 0.68 + distanceConfidence * 0.32),
+  };
+};
+
+const sampleGridCandidates = (
+  context: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  gridSize: number,
+  startIndex: number,
+): SampleCandidate[] => {
+  const side = Math.min(width, height) * 0.62;
+  const left = (width - side) / 2;
+  const top = (height - side) / 2;
+  const cell = side / gridSize;
+  const candidates: SampleCandidate[] = [];
+
+  for (let row = 0; row < gridSize; row++) {
+    for (let col = 0; col < gridSize; col++) {
+      const sampleSide = Math.max(2, Math.floor(cell * 0.48));
+      const x = Math.floor(left + col * cell + (cell - sampleSide) / 2);
+      const y = Math.floor(top + row * cell + (cell - sampleSide) / 2);
+      const imageData = context.getImageData(x, y, sampleSide, sampleSide).data;
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      let count = 0;
+
+      for (let i = 0; i < imageData.length; i += 4) {
+        r += imageData[i];
+        g += imageData[i + 1];
+        b += imageData[i + 2];
+        count += 1;
+      }
+
+      const rgb = { r: r / count, g: g / count, b: b / count };
+      const scores = CUBE_COLORS.reduce((acc, color) => {
+        acc[color] = scoreColor(rgb, color);
+        return acc;
+      }, {} as Record<CubeColor, number>);
+
+      candidates.push({
+        index: startIndex + row * gridSize + col,
+        rgb,
+        scores,
+      });
+    }
+  }
+
+  return candidates;
+};
+
+const buildCalibratedReferences = (candidates: SampleCandidate[]) => {
+  const groups = CUBE_COLORS.reduce((acc, color) => {
+    acc[color] = [];
+    return acc;
+  }, {} as Record<CubeColor, Rgb[]>);
+
+  candidates.forEach((candidate) => {
+    const decision = classifyRgb(candidate.rgb);
+    if (decision.confidence >= 0.35) {
+      groups[decision.color].push(candidate.rgb);
+    }
+  });
+
+  return CUBE_COLORS.reduce((acc, color) => {
+    const group = groups[color];
+    if (group.length < 2) {
+      acc[color] = COLOR_LABS[color];
+      return acc;
+    }
+
+    const channelMedian = (channel: keyof Rgb) => {
+      const values = group.map((rgb) => rgb[channel]).sort((a, b) => a - b);
+      return values[Math.floor(values.length / 2)];
+    };
+
+    acc[color] = rgbToLab({
+      r: channelMedian('r'),
+      g: channelMedian('g'),
+      b: channelMedian('b'),
+    });
+    return acc;
+  }, {} as Record<CubeColor, ReturnType<typeof rgbToLab>>);
+};
+
+const classifyCandidates = (
+  candidates: SampleCandidate[],
+  references: Record<CubeColor, ReturnType<typeof rgbToLab>> = COLOR_LABS,
+) => {
+  const decisions = candidates.map((candidate) => classifyRgb(candidate.rgb, references));
+  const counts = emptyColorCounts();
+  decisions.forEach((decision) => {
+    counts[decision.color] += 1;
+  });
+
+  return {
+    colors: decisions.map((decision) => decision.color),
+    counts,
+    confidence: decisions.length
+      ? decisions.reduce((sum, decision) => sum + decision.confidence, 0) / decisions.length
+      : 0,
+    decisions,
+  };
+};
+
+const rebalanceDetectedColors = (
+  candidates: SampleCandidate[],
+  expectedPerColor: number,
+  references: Record<CubeColor, ReturnType<typeof rgbToLab>> = COLOR_LABS,
+) => {
+  const assignments = new Map<number, CubeColor>();
+  const remaining = CUBE_COLORS.reduce((acc, color) => {
+    acc[color] = expectedPerColor;
+    return acc;
+  }, {} as Record<CubeColor, number>);
+
+  const ranked = candidates
+    .flatMap((candidate) => CUBE_COLORS.map((color) => ({
+      index: candidate.index,
+      color,
+      score: scoreColor(candidate.rgb, color, references),
+    })))
+    .sort((a, b) => a.score - b.score);
+
+  ranked.forEach(({ index, color }) => {
+    if (assignments.has(index) || remaining[color] <= 0) return;
+    assignments.set(index, color);
+    remaining[color] -= 1;
+  });
+
+  candidates.forEach((candidate) => {
+    if (assignments.has(candidate.index)) return;
+    const fallback = CUBE_COLORS.find((color) => remaining[color] > 0) || 'W';
+    assignments.set(candidate.index, fallback);
+    remaining[fallback] -= 1;
+  });
+
+  return candidates
+    .slice()
+    .sort((a, b) => a.index - b.index)
+    .map((candidate) => assignments.get(candidate.index) || 'W');
+};
+
+const validateScanReport = (
+  candidates: SampleCandidate[],
+  colors: CubeColor[],
+  expectedPerColor: number,
+  confidence: number,
+): ScanReport => {
+  const counts = emptyColorCounts();
+  colors.forEach((color) => {
+    counts[color] += 1;
+  });
+
+  const details = CUBE_COLORS
+    .filter((color) => counts[color] !== expectedPerColor)
+    .map((color) => `${color}: ${counts[color]}/${expectedPerColor}`);
+
+  if (candidates.length !== expectedPerColor * 6) {
+    details.push(`Expected ${expectedPerColor * 6} stickers, sampled ${candidates.length}.`);
+  }
+
+  if (confidence < 0.42) {
+    details.push('Low color confidence. Use brighter light and fill the guide square with the cube face.');
+  }
+
+  return {
+    colors,
+    confidence,
+    counts,
+    valid: details.length === 0,
+    message: details.length === 0
+      ? `Scan validated with ${Math.round(confidence * 100)}% color confidence.`
+      : `Scan needs another pass: ${details.join(', ')}`,
+    details,
+  };
+};
 
 export default function SolverPage() {
   const {
@@ -41,10 +344,18 @@ export default function SolverPage() {
   const [isRecording, setIsRecording] = useState(false);
   const [isAnalyzingMedia, setIsAnalyzingMedia] = useState(false);
   const [mediaAnalysis, setMediaAnalysis] = useState<string | null>(null);
+  const [cameraFacingMode, setCameraFacingMode] = useState<CameraFacingMode>('environment');
+  const [liveScan, setLiveScan] = useState<ScanReport | null>(null);
+  const [scannedFaces, setScannedFaces] = useState<ScannedFace[]>([]);
+  const [scanReport, setScanReport] = useState<ScanReport | null>(null);
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
   const startTimeRef = useRef(0);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
+  const liveVideoRef = useRef<HTMLVideoElement | null>(null);
+  const liveCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const liveScanFrameRef = useRef<number | null>(null);
+  const lastLiveScanAtRef = useRef(0);
   const recordedChunksRef = useRef<Blob[]>([]);
 
   const startTimer = useCallback(() => {
@@ -73,6 +384,11 @@ export default function SolverPage() {
       mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     };
   }, []);
+
+  useEffect(() => {
+    if (!liveVideoRef.current) return;
+    liveVideoRef.current.srcObject = mediaStreamRef.current;
+  }, [isRecording]);
 
   const formatTimerTime = (ms: number) => {
     const minutes = Math.floor(ms / 60000);
@@ -142,8 +458,25 @@ export default function SolverPage() {
     setShowResult(false);
     const solveTime = timerTime > 0 ? timerTime : undefined;
     if (timerRunning) pauseTimer();
+
+    const counts = emptyColorCounts();
+    state.forEach((color) => {
+      counts[color] += 1;
+    });
+    const invalidCounts = CUBE_COLORS
+      .filter((color) => counts[color] !== expectedPerColor)
+      .map((color) => `${color}: ${counts[color]}/${expectedPerColor}`);
+    if (state.length !== expectedPerColor * 6 || invalidCounts.length > 0) {
+      const message = invalidCounts.length > 0
+        ? `Invalid cube state. Fix color counts: ${invalidCounts.join(', ')}.`
+        : `Invalid cube state. Expected ${expectedPerColor * 6} stickers.`;
+      setMediaAnalysis(message);
+      showToast(message, 'error');
+      return;
+    }
+
     try {
-      await solveCube();
+      await solveCube(solveTime);
       setShowResult(true);
       showToast(`Cube solved${solveTime ? ` in ${formatTimerTime(solveTime)}` : ''}!`, 'success');
     } catch {
@@ -157,6 +490,7 @@ export default function SolverPage() {
     setShowResult(false);
     setRotationY(-32);
     setUndoStack([]);
+    resetScanFaces();
     resetTimer();
     showToast('Cube reset', 'info');
   };
@@ -170,71 +504,356 @@ export default function SolverPage() {
     }
   };
 
-  const createDetectedCubeState = () => {
-    const colors: CubeColor[] = ['W', 'Y', 'R', 'O', 'B', 'G'];
-    const size = gridSize * gridSize;
-    const balanced = colors.flatMap((color) => Array.from({ length: size }, () => color));
-    return balanced.map((_, index) => balanced[(index * 7 + 11) % balanced.length]);
-  };
-
   const handleMediaUpload = (file: File | null) => {
     if (!file) return;
     if (mediaUrl) URL.revokeObjectURL(mediaUrl);
     setMediaUrl(URL.createObjectURL(file));
     setMediaName(file.name);
     setMediaAnalysis(null);
+    setScannedFaces([]);
+    setScanReport(null);
+  };
+
+  const stopCameraStream = () => {
+    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+    mediaStreamRef.current = null;
+    if (liveVideoRef.current) liveVideoRef.current.srcObject = null;
+  };
+
+  const getCameraStream = async (facingMode: CameraFacingMode) => {
+    try {
+      return await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: facingMode },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+        audio: false,
+      });
+    } catch {
+      return navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    }
   };
 
   const startRecording = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      stopCameraStream();
+      setLiveScan(null);
+      setScanReport(null);
+      setScannedFaces([]);
+      const stream = await getCameraStream(cameraFacingMode);
       mediaStreamRef.current = stream;
+      if (liveVideoRef.current) liveVideoRef.current.srcObject = stream;
       recordedChunksRef.current = [];
-      const recorder = new MediaRecorder(stream);
-      mediaRecorderRef.current = recorder;
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) recordedChunksRef.current.push(event.data);
-      };
-      recorder.onstop = () => {
-        const blob = new Blob(recordedChunksRef.current, { type: 'video/webm' });
-        if (mediaUrl) URL.revokeObjectURL(mediaUrl);
-        setMediaUrl(URL.createObjectURL(blob));
-        setMediaName('Recorded cube scan.webm');
-        setMediaAnalysis(null);
-        stream.getTracks().forEach((track) => track.stop());
-        mediaStreamRef.current = null;
-      };
-      recorder.start();
+      if (typeof MediaRecorder !== 'undefined') {
+        const recorder = new MediaRecorder(stream);
+        mediaRecorderRef.current = recorder;
+        recorder.ondataavailable = (event) => {
+          if (event.data.size > 0) recordedChunksRef.current.push(event.data);
+        };
+        recorder.onstop = () => {
+          if (recordedChunksRef.current.length > 0) {
+            const blob = new Blob(recordedChunksRef.current, { type: 'video/webm' });
+            if (mediaUrl) URL.revokeObjectURL(mediaUrl);
+            setMediaUrl(URL.createObjectURL(blob));
+            setMediaName('Recorded cube scan.webm');
+          }
+          setMediaAnalysis(null);
+          stopCameraStream();
+        };
+        recorder.start();
+      }
       setIsRecording(true);
-      showToast('Recording started. Slowly show all 6 cube faces.', 'info');
+      showToast('Scanner started. Capture each face in order.', 'info');
     } catch {
       showToast('Camera permission was blocked or unavailable.', 'error');
     }
   };
 
   const stopRecording = () => {
-    mediaRecorderRef.current?.stop();
+    if (mediaRecorderRef.current?.state === 'recording') mediaRecorderRef.current.stop();
+    else stopCameraStream();
     setIsRecording(false);
-    showToast('Recording saved for analysis', 'success');
+    showToast(scannedFaces.length > 0 ? 'Scan paused. Captured faces were kept.' : 'Camera stopped', 'info');
+  };
+
+  const switchCamera = () => {
+    const nextMode: CameraFacingMode = cameraFacingMode === 'environment' ? 'user' : 'environment';
+    setCameraFacingMode(nextMode);
+    showToast(`Camera set to ${nextMode === 'environment' ? 'back' : 'front'} lens`, 'info');
+  };
+
+  const loadVideo = (src: string) => new Promise<HTMLVideoElement>((resolve, reject) => {
+    const video = document.createElement('video');
+    video.preload = 'metadata';
+    video.muted = true;
+    video.playsInline = true;
+    video.onloadedmetadata = () => resolve(video);
+    video.onerror = () => reject(new Error('Could not read this video.'));
+    video.src = src;
+  });
+
+  const seekVideo = (video: HTMLVideoElement, time: number) => new Promise<void>((resolve, reject) => {
+    const timeout = window.setTimeout(() => reject(new Error('Video seek timed out.')), 6000);
+    video.onseeked = () => {
+      window.clearTimeout(timeout);
+      resolve();
+    };
+    video.currentTime = time;
+  });
+
+  const loadImage = (src: string) => new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('Could not read this image.'));
+    image.src = src;
+  });
+
+  const sampleVideoElement = (video: HTMLVideoElement, startIndex: number) => {
+    if (!video.videoWidth || !video.videoHeight) {
+      throw new Error('Camera frame is not ready yet.');
+    }
+
+    const canvas = liveCanvasRef.current || document.createElement('canvas');
+    liveCanvasRef.current = canvas;
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    if (!context) throw new Error('Canvas analysis is unavailable in this browser.');
+
+    const maxWidth = 720;
+    const scale = Math.min(1, maxWidth / video.videoWidth);
+    canvas.width = Math.max(320, Math.round(video.videoWidth * scale));
+    canvas.height = Math.max(180, Math.round(video.videoHeight * scale));
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    return sampleGridCandidates(context, canvas.width, canvas.height, gridSize, startIndex);
+  };
+
+  const buildReportFromCandidates = (candidates: SampleCandidate[]) => {
+    const references = buildCalibratedReferences(candidates);
+    const raw = classifyCandidates(candidates, references);
+    const balancedColors = rebalanceDetectedColors(candidates, expectedPerColor, references);
+    const balancedDecisions = candidates.map((candidate, index) => ({
+      color: balancedColors[index],
+      decision: classifyRgb(candidate.rgb, references),
+    }));
+    const balancedConfidence = balancedDecisions.length
+      ? balancedDecisions.reduce((sum, item) => {
+        const colorPenalty = item.color === item.decision.color ? 1 : 0.72;
+        return sum + item.decision.confidence * colorPenalty;
+      }, 0) / balancedDecisions.length
+      : 0;
+
+    const rawCountDistance = CUBE_COLORS.reduce((sum, color) => (
+      sum + Math.abs(raw.counts[color] - expectedPerColor)
+    ), 0);
+    const report = validateScanReport(
+      candidates,
+      balancedColors,
+      expectedPerColor,
+      Math.min(raw.confidence, balancedConfidence),
+    );
+
+    if (rawCountDistance > expectedPerColor * 1.8) {
+      report.valid = false;
+      report.details.push(`Raw color balance is too far off (${rawCountDistance} misplaced color votes).`);
+      report.message = `Scan needs another pass: ${report.details.join(', ')}`;
+    }
+
+    return report;
+  };
+
+  const captureCurrentFace = () => {
+    if (!isRecording || !liveVideoRef.current) {
+      showToast('Start the camera before capturing a face.', 'error');
+      return;
+    }
+    if (scannedFaces.length >= 6) {
+      showToast('All 6 faces are already captured. Analyze or reset the scan.', 'info');
+      return;
+    }
+
+    try {
+      const faceIndex = scannedFaces.length;
+      const samples = sampleVideoElement(liveVideoRef.current, faceIndex * expectedPerColor);
+      const preview = classifyCandidates(samples);
+      if (preview.confidence < 0.28) {
+        showToast('Face is too blurry or dim. Hold still in brighter light.', 'error');
+        return;
+      }
+
+      const nextFaces = [
+        ...scannedFaces,
+        {
+          id: faceIndex,
+          label: SCAN_FACE_ORDER[faceIndex],
+          samples,
+          colors: preview.colors,
+          confidence: preview.confidence,
+          capturedAt: Date.now(),
+        },
+      ];
+      setScannedFaces(nextFaces);
+      setScanReport(null);
+      showToast(`${SCAN_FACE_ORDER[faceIndex]} face captured`, 'success');
+
+      if (nextFaces.length === 6) {
+        const report = buildReportFromCandidates(nextFaces.flatMap((face) => face.samples));
+        setScanReport(report);
+        if (report.valid) {
+          setCubeState(report.colors);
+          setMediaAnalysis(report.message);
+          showToast('Scan validated and applied to the cube.', 'success');
+        } else {
+          setMediaAnalysis(null);
+          showToast('Scan is not reliable yet. Retake the weak faces.', 'error');
+        }
+      }
+    } catch (err: any) {
+      showToast(err.message || 'Could not capture this face.', 'error');
+    }
+  };
+
+  const resetScanFaces = () => {
+    setScannedFaces([]);
+    setScanReport(null);
+    setLiveScan(null);
+    setMediaAnalysis(null);
+  };
+
+  const analyzeVideoFrames = async (src: string) => {
+    const video = await loadVideo(src);
+    const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 6;
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    if (!context) throw new Error('Canvas analysis is unavailable in this browser.');
+
+    canvas.width = video.videoWidth || 1280;
+    canvas.height = video.videoHeight || 720;
+
+    const candidates: SampleCandidate[] = [];
+    const faceletsPerFace = gridSize * gridSize;
+    const safeDuration = Math.max(0.6, duration - 0.2);
+
+    for (let face = 0; face < 6; face++) {
+      const time = Math.min(safeDuration, Math.max(0.1, ((face + 0.5) / 6) * safeDuration));
+      await seekVideo(video, time);
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      candidates.push(...sampleGridCandidates(context, canvas.width, canvas.height, gridSize, face * faceletsPerFace));
+    }
+
+    const report = buildReportFromCandidates(candidates);
+    if (!report.valid) throw new Error(report.message);
+    setScanReport(report);
+    return report.colors;
+  };
+
+  const analyzeImageFrame = async (src: string) => {
+    const image = await loadImage(src);
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    if (!context) throw new Error('Canvas analysis is unavailable in this browser.');
+
+    canvas.width = image.naturalWidth || image.width;
+    canvas.height = image.naturalHeight || image.height;
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+    const candidates: SampleCandidate[] = [];
+    const faceletsPerFace = gridSize * gridSize;
+    for (let face = 0; face < 6; face++) {
+      candidates.push(...sampleGridCandidates(context, canvas.width, canvas.height, gridSize, face * faceletsPerFace));
+    }
+
+    const report = buildReportFromCandidates(candidates);
+    if (!report.valid) throw new Error(report.message);
+    setScanReport(report);
+    return report.colors;
   };
 
   const analyzeMedia = async () => {
+    if (scannedFaces.length > 0) {
+      if (scannedFaces.length !== 6) {
+        showToast(`Capture ${6 - scannedFaces.length} more face${6 - scannedFaces.length === 1 ? '' : 's'} before analyzing.`, 'error');
+        return;
+      }
+
+      const report = buildReportFromCandidates(scannedFaces.flatMap((face) => face.samples));
+      setScanReport(report);
+      if (!report.valid) {
+        setMediaAnalysis(null);
+        showToast('Scan is not reliable yet. Retake the weak faces.', 'error');
+        return;
+      }
+      setMediaAnalysis(report.message);
+      setCubeState(report.colors);
+      showToast('Scan validated and applied to the cube.', 'success');
+      return;
+    }
+
     if (!mediaUrl) {
       showToast('Upload or record a cube video first.', 'error');
       return;
     }
     setIsAnalyzingMedia(true);
     setMediaAnalysis(null);
-    await new Promise((resolve) => setTimeout(resolve, 1800));
-    const detectedState = createDetectedCubeState();
-    setCubeState(detectedState);
-    setIsAnalyzingMedia(false);
-    setMediaAnalysis(`Detected a ${cubeType} cube scan with balanced colors. Review the painted cube, then use Solve to follow each move.`);
-    showToast('Media analyzed and cube colors filled. Review once, then solve.', 'success');
+    try {
+      const isImage = mediaName.match(/\.(png|jpe?g|webp|gif)$/i);
+      const detectedState = isImage
+        ? await analyzeImageFrame(mediaUrl)
+        : await analyzeVideoFrames(mediaUrl);
+      setCubeState(detectedState);
+      setMediaAnalysis(
+        isImage
+          ? `Sampled the center grid from the image and balanced it for a ${cubeType} cube. For best results, record a video with all 6 faces.`
+          : `Sampled 6 moments from the video, classified sticker colors, and balanced the ${cubeType} state for the solver.`,
+      );
+      showToast('Media analyzed and cube colors filled. Review once, then solve.', 'success');
+    } catch (err: any) {
+      showToast(err.message || 'Could not analyze this media.', 'error');
+    } finally {
+      setIsAnalyzingMedia(false);
+    }
   };
 
   const gridSize = parseInt(cubeType.charAt(0));
   const expectedPerColor = gridSize * gridSize; // 4, 9, 16, or 25
+
+  useEffect(() => {
+    if (!isRecording) {
+      if (liveScanFrameRef.current) cancelAnimationFrame(liveScanFrameRef.current);
+      liveScanFrameRef.current = null;
+      return;
+    }
+
+    const scanFrame = (timestamp: number) => {
+      if (timestamp - lastLiveScanAtRef.current > 180 && liveVideoRef.current?.readyState) {
+        lastLiveScanAtRef.current = timestamp;
+        try {
+          const samples = sampleVideoElement(liveVideoRef.current, 0);
+          const preview = classifyCandidates(samples);
+          setLiveScan({
+            colors: preview.colors,
+            confidence: preview.confidence,
+            counts: preview.counts,
+            valid: preview.confidence >= 0.35,
+            message: preview.confidence >= 0.35
+              ? `Live color confidence ${Math.round(preview.confidence * 100)}%`
+              : 'Hold the face flatter, closer, and in brighter light.',
+            details: [],
+          });
+        } catch {
+          // The video element can be briefly unready immediately after permission is granted.
+        }
+      }
+      liveScanFrameRef.current = requestAnimationFrame(scanFrame);
+    };
+
+    liveScanFrameRef.current = requestAnimationFrame(scanFrame);
+    return () => {
+      if (liveScanFrameRef.current) cancelAnimationFrame(liveScanFrameRef.current);
+      liveScanFrameRef.current = null;
+    };
+  }, [isRecording, gridSize]);
+
   const colorCounts = COLORS.map((c) => ({
     ...c,
     count: state.filter((s) => s === c.value).length,
@@ -432,6 +1051,15 @@ export default function SolverPage() {
                   onChange={(event) => handleMediaUpload(event.target.files?.[0] || null)}
                 />
               </label>
+              <button
+                onClick={switchCamera}
+                disabled={isRecording}
+                className="solver-blue-button disabled:opacity-40"
+                title="Switch camera before recording"
+              >
+                <SwitchCamera size={16} />
+                <span>{cameraFacingMode === 'environment' ? 'Back' : 'Front'}</span>
+              </button>
               {isRecording ? (
                 <button onClick={stopRecording} className="solver-blue-button">
                   <Square size={15} />
@@ -443,7 +1071,21 @@ export default function SolverPage() {
                   <span>Record</span>
                 </button>
               )}
-              <button onClick={analyzeMedia} disabled={isAnalyzingMedia || !mediaUrl} className="solver-blue-button disabled:opacity-40">
+              {isRecording && (
+                <button onClick={captureCurrentFace} className="solver-blue-button">
+                  <ScanLine size={16} />
+                  <span>{scannedFaces.length < 6 ? `Capture ${SCAN_FACE_ORDER[scannedFaces.length]}` : 'Captured'}</span>
+                </button>
+              )}
+              <button
+                onClick={resetScanFaces}
+                disabled={scannedFaces.length === 0 && !scanReport}
+                className="solver-blue-button disabled:opacity-40"
+              >
+                <RotateCcw size={15} />
+                <span>Reset Scan</span>
+              </button>
+              <button onClick={analyzeMedia} disabled={isAnalyzingMedia || (!mediaUrl && scannedFaces.length === 0)} className="solver-blue-button disabled:opacity-40">
                 {isAnalyzingMedia ? (
                   <>
                     <div className="h-4 w-4 rounded-full border-2 border-white/30 border-t-white animate-spin" />
@@ -461,7 +1103,42 @@ export default function SolverPage() {
 
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-[0.95fr_1.05fr]">
             <div className="overflow-hidden rounded-2xl border border-white/[0.06] bg-black/20">
-              {mediaUrl ? (
+              {isRecording ? (
+                <div className="relative aspect-video">
+                  <video
+                    ref={liveVideoRef}
+                    autoPlay
+                    muted
+                    playsInline
+                    className="h-full w-full object-cover"
+                  />
+                  <div className="absolute left-3 top-3 flex items-center gap-2 rounded-full border border-red-400/30 bg-red-500/20 px-3 py-1 text-xs font-bold text-red-200">
+                    <span className="h-2 w-2 rounded-full bg-red-400 animate-pulse" />
+                    Recording
+                  </div>
+                  <div className="absolute right-3 top-3 rounded-full border border-cyan-300/30 bg-black/45 px-3 py-1 text-xs font-bold text-cyan-100">
+                    {liveScan ? `${Math.round(liveScan.confidence * 100)}%` : 'Scanning'}
+                  </div>
+                  <div className="pointer-events-none absolute inset-[19%] border border-cyan-300/60 shadow-[0_0_0_999px_rgba(0,0,0,0.24)]">
+                    {liveScan && (
+                      <div className="grid h-full w-full gap-1 bg-black/15 p-1" style={{ gridTemplateColumns: `repeat(${gridSize}, 1fr)` }}>
+                        {liveScan.colors.map((color, index) => (
+                          <div
+                            key={`${color}-${index}`}
+                            className="rounded-[4px] border border-black/35 opacity-80"
+                            style={{ backgroundColor: COLOR_HEX[color] }}
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <div className="absolute bottom-3 left-3 right-3 rounded-xl border border-white/10 bg-black/45 px-3 py-2 text-xs text-white/70">
+                    {scannedFaces.length < 6
+                      ? `Next: ${SCAN_FACE_ORDER[scannedFaces.length]} face. Fill the guide and tap Capture.`
+                      : 'All faces captured. Tap Analyze to validate the scan.'}
+                  </div>
+                </div>
+              ) : mediaUrl ? (
                 mediaName.match(/\.(png|jpe?g|webp|gif)$/i) ? (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img src={mediaUrl} alt="Uploaded cube scan" className="aspect-video h-full w-full object-cover" />
@@ -484,6 +1161,7 @@ export default function SolverPage() {
                 {[
                   'Show one face at a time in bright light.',
                   'Keep the cube centered and steady for 1-2 seconds per face.',
+                  'Use the Back/Front camera button before recording if the wrong lens opens.',
                   'Capture white, yellow, red, orange, blue, and green faces.',
                   'After analysis, review the painted stickers before solving.',
                 ].map((item, index) => (
@@ -493,6 +1171,44 @@ export default function SolverPage() {
                   </div>
                 ))}
               </div>
+              <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3">
+                {SCAN_FACE_ORDER.map((label, index) => {
+                  const face = scannedFaces[index];
+                  return (
+                    <div
+                      key={label}
+                      className={`rounded-xl border px-3 py-2 text-xs ${
+                        face
+                          ? 'border-emerald-400/25 bg-emerald-500/10 text-emerald-200'
+                          : index === scannedFaces.length && isRecording
+                            ? 'border-cyan-300/30 bg-cyan-500/10 text-cyan-100'
+                            : 'border-white/[0.06] bg-white/[0.03] text-white/35'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-bold">{label}</span>
+                        {face ? <Check size={13} /> : <span className="text-[10px]">{index + 1}</span>}
+                      </div>
+                      <div className="mt-1 text-[10px] opacity-70">
+                        {face ? `${Math.round(face.confidence * 100)}% confidence` : 'Waiting'}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              {scanReport && (
+                <div className={`mt-4 rounded-xl border p-3 text-sm ${
+                  scanReport.valid
+                    ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-300'
+                    : 'border-amber-500/25 bg-amber-500/10 text-amber-200'
+                }`}>
+                  <div className="mb-2 flex items-center gap-2 font-semibold">
+                    {scanReport.valid ? <Check size={14} /> : <AlertCircle size={14} />}
+                    {scanReport.valid ? 'Scan Validated' : 'Scan Needs Retake'}
+                  </div>
+                  <p className="opacity-75">{scanReport.message}</p>
+                </div>
+              )}
               {mediaAnalysis && (
                 <div className="mt-4 rounded-xl border border-emerald-500/20 bg-emerald-500/10 p-3 text-sm text-emerald-300">
                   <div className="mb-1 flex items-center gap-2 font-semibold">

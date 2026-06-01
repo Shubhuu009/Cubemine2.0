@@ -15,7 +15,9 @@ const toPublicUser = (user) => ({
   bestTime5x5: user.bestTime5x5,
   authProvider: user.authProvider,
   avatar: user.avatar,
+  preferences: user.preferences,
   createdAt: user.createdAt,
+  updatedAt: user.updatedAt,
 });
 
 const createUsernameFromGoogle = (payload) => {
@@ -56,7 +58,7 @@ const verifyGoogleToken = async (credential) => {
 
 class AuthService {
   static async signup({ username, email, password }) {
-    const existingUser = await User.findOne({ $or: [{ email }, { username }] });
+    const existingUser = await User.findOne({ $or: [{ email }, { username }] }).lean();
 
     if (existingUser) {
       const field = existingUser.email === email ? 'Email' : 'Username';

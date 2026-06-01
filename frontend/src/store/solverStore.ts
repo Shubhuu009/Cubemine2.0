@@ -15,7 +15,7 @@ interface SolverState {
   setFacelet: (index: number, color: CubeColor) => void;
   setSelectedColor: (color: CubeColor) => void;
   resetCube: () => void;
-  solveCube: () => Promise<void>;
+  solveCube: (solveTime?: number) => Promise<void>;
   clearResult: () => void;
 }
 
@@ -61,14 +61,15 @@ export const useSolverStore = create<SolverState>((set, get) => ({
     set({ state: createEmptyState(get().cubeType), result: null, error: null });
   },
 
-  solveCube: async () => {
+  solveCube: async (solveTime) => {
     set({ isLoading: true, error: null, result: null });
     try {
       const { cubeType, state } = get();
-      const res = await solverAPI.solve({ cubeType, state });
+      const res = await solverAPI.solve({ cubeType, state, solveTime });
       set({ result: res.data, isLoading: false });
     } catch (err: any) {
       set({ error: err.message, isLoading: false });
+      throw err;
     }
   },
 

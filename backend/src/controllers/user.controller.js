@@ -3,11 +3,9 @@ const SolveHistory = require('../models/SolveHistory');
 
 const VALID_CUBE_TYPES = ['2x2', '3x3', '4x4', '5x5'];
 
-// ── Profile ───────────────────────────────────────────────
-
 const getProfile = async (req, res, next) => {
   try {
-    const user = await User.findById(req.user._id);
+    const user = await User.findById(req.user._id).lean();
     if (!user) { const e = new Error('User not found'); e.statusCode = 404; throw e; }
 
     res.status(200).json({
@@ -37,13 +35,13 @@ const updateProfile = async (req, res, next) => {
     const updates = {};
 
     if (username) {
-      const taken = await User.findOne({ username, _id: { $ne: req.user._id } });
+      const taken = await User.exists({ username, _id: { $ne: req.user._id } });
       if (taken) { const e = new Error('Username already taken'); e.statusCode = 409; throw e; }
       updates.username = username;
     }
     if (avatar !== undefined) updates.avatar = avatar;
 
-    const user = await User.findByIdAndUpdate(req.user._id, updates, { new: true, runValidators: true });
+    const user = await User.findByIdAndUpdate(req.user._id, updates, { new: true, runValidators: true }).lean();
 
     res.status(200).json({
       success: true,
@@ -66,11 +64,9 @@ const updateProfile = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
-// ── Preferences ───────────────────────────────────────────
-
 const getPreferences = async (req, res, next) => {
   try {
-    const user = await User.findById(req.user._id).select('preferences');
+    const user = await User.findById(req.user._id).select('preferences').lean();
     res.status(200).json({ success: true, data: user.preferences });
   } catch (error) { next(error); }
 };
@@ -83,12 +79,10 @@ const updatePreferences = async (req, res, next) => {
       if (req.body[key] !== undefined) updates[`preferences.${key}`] = req.body[key];
     });
 
-    const user = await User.findByIdAndUpdate(req.user._id, updates, { new: true }).select('preferences');
+    const user = await User.findByIdAndUpdate(req.user._id, updates, { new: true }).select('preferences').lean();
     res.status(200).json({ success: true, message: 'Preferences saved', data: user.preferences });
   } catch (error) { next(error); }
 };
-
-// ── Delete Account ────────────────────────────────────────
 
 const deleteAccount = async (req, res, next) => {
   try {
@@ -98,12 +92,10 @@ const deleteAccount = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
-// ── History ───────────────────────────────────────────────
-
 const getHistory = async (req, res, next) => {
   try {
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 20;
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
     const skip = (page - 1) * limit;
     const filter = { userId: req.user._id };
     if (req.query.cubeType && VALID_CUBE_TYPES.includes(req.query.cubeType)) filter.cubeType = req.query.cubeType;
@@ -120,12 +112,10 @@ const getHistory = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
-// ── Leaderboard ───────────────────────────────────────────
-
 const getLeaderboard = async (req, res, next) => {
   try {
     const sortBy = req.query.sortBy || 'totalSolves';
-    const limit = Math.min(parseInt(req.query.limit) || 25, 100);
+    const limit = Math.min(parseInt(req.query.limit, 10) || 25, 100);
 
     let sortField = {}, filter = {};
     switch (sortBy) {
@@ -138,7 +128,9 @@ const getLeaderboard = async (req, res, next) => {
 
     const users = await User.find(filter)
       .select('username totalSolves bestTime2x2 bestTime3x3 bestTime4x4 bestTime5x5 createdAt')
-      .sort(sortField).limit(limit).lean();
+      .sort(sortField)
+      .limit(limit)
+      .lean();
 
     const leaderboard = users.map((u, i) => ({ rank: i + 1, username: u.username, totalSolves: u.totalSolves, bestTime2x2: u.bestTime2x2, bestTime3x3: u.bestTime3x3, bestTime4x4: u.bestTime4x4, bestTime5x5: u.bestTime5x5, memberSince: u.createdAt }));
 
@@ -146,14 +138,16 @@ const getLeaderboard = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
-// ── Statistics ────────────────────────────────────────────
-
 const getStatistics = async (req, res, next) => {
   try {
     const filter = { userId: req.user._id };
     if (req.query.cubeType && VALID_CUBE_TYPES.includes(req.query.cubeType)) filter.cubeType = req.query.cubeType;
 
-    const solves = await SolveHistory.find(filter).sort({ createdAt: -1 }).limit(500).select('cubeType moveCount solveTime solved createdAt').lean();
+    const solves = await SolveHistory.find(filter)
+      .sort({ createdAt: -1 })
+      .limit(500)
+      .select('cubeType moveCount solveTime solved createdAt')
+      .lean();
     return sendStatistics(res, solves);
   } catch (error) { next(error); }
 };

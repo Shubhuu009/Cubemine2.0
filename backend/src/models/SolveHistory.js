@@ -40,4 +40,7 @@ const solveHistorySchema = new mongoose.Schema(
   }
 );
 
+solveHistorySchema.index({ userId: 1, createdAt: -1 });
+solveHistorySchema.index({ userId: 1, cubeType: 1, createdAt: -1 });
+
 module.exports = mongoose.model('SolveHistory', solveHistorySchema);

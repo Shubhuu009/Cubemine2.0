@@ -26,15 +26,10 @@ const solveCube = async (req, res, next) => {
       });
 
       const updateData = { $inc: { totalSolves: 1 } };
+      const bestTimeField = BEST_TIME_FIELD[cubeType];
 
-      if (solveTime) {
-        const bestTimeField = BEST_TIME_FIELD[cubeType];
-        if (bestTimeField) {
-          const user = await User.findById(req.user._id);
-          if (!user[bestTimeField] || solveTime < user[bestTimeField]) {
-            updateData.$set = { [bestTimeField]: solveTime };
-          }
-        }
+      if (solveTime && bestTimeField && (!req.user[bestTimeField] || solveTime < req.user[bestTimeField])) {
+        updateData.$set = { [bestTimeField]: solveTime };
       }
 
       await User.findByIdAndUpdate(req.user._id, updateData);

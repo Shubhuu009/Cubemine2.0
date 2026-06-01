@@ -21,5 +21,8 @@ const reviewSchema = new mongoose.Schema(
 
 // One review per user
 reviewSchema.index({ userId: 1 }, { unique: true });
+reviewSchema.index({ cubeType: 1, createdAt: -1 });
+reviewSchema.index({ helpfulVotes: -1 });
+reviewSchema.index({ rating: -1 });
 
 module.exports = mongoose.model('Review', reviewSchema);

@@ -5,7 +5,10 @@ const connectDB = async () => {
     throw new Error('MONGO_URI is not set. Add it to your .env file.');
   }
 
-  const conn = await mongoose.connect(process.env.MONGO_URI);
+  const conn = await mongoose.connect(process.env.MONGO_URI, {
+    serverSelectionTimeoutMS: 8000,
+    maxPoolSize: 10,
+  });
   console.log(`MongoDB connected: ${conn.connection.host}`);
 };
 
